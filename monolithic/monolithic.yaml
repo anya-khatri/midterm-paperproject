@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'URL Shortener Monolithic Architecture'
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair
+
+Resources:
+  # VPC and Network Configuration
+  URLShortenerVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: url-shortener-vpc
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref URLShortenerVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: url-shortener-public-subnet
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: url-shortener-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref URLShortenerVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref URLShortenerVPC
+      Tags:
+        - Key: Name
+          Value: url-shortener-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Group
+  URLShortenerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP and SSH access
+      VpcId: !Ref URLShortenerVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
+
+  # EC2 Instance
+  URLShortenerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0230bd60aa48260c6  # Amazon Linux 2023 AMI in us-east-1
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: 
+        - !Ref URLShortenerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: url-shortener-monolithic
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install python3-pip -y
+          
+          # Create application directory
+          mkdir -p /home/ec2-user/app
+          cd /home/ec2-user/app
+          
+          # Create requirements.txt
+          cat << 'EOF' > requirements.txt
+          flask==2.0.1
+          EOF
+          
+          # Create application file
+          cat << 'EOF' > app.py
+          from flask import Flask, jsonify, redirect
+          import random
+          import string
+
+          app = Flask(__name__)
+
+          # In-memory storage (for demonstration)
+          url_database = {}
+
+          def generate_short_code():
+              return ''.join(random.choices(string.ascii_letters + string.digits, k=4))
+
+          @app.route('/')
+          def home():
+              return "URL Shortener is running!"
+
+          @app.route('/create/<path:url>')
+          def create_short_url(url):
+              short_code = generate_short_code()
+              url_database[short_code] = url
+              return jsonify({
+                  "original_url": url,
+                  "short_code": short_code,
+                  "short_url": f"http://{request.host}/{short_code}"
+              })
+
+          @app.route('/<short_code>')
+          def redirect_url(short_code):
+              long_url = url_database.get(short_code)
+              if long_url:
+                  return redirect(long_url)
+              return jsonify({"error": "URL not found"}), 404
+
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=5000)
+          EOF
+          
+          # Install dependencies
+          pip3 install -r requirements.txt
+          
+          # Create and enable systemd service
+          cat << 'EOF' > /etc/systemd/system/urlshortener.service
+          [Unit]
+          Description=URL Shortener Flask App
+          After=network.target
+
+          [Service]
+          User=ec2-user
+          WorkingDirectory=/home/ec2-user/app
+          ExecStart=/usr/local/bin/python3 app.py
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          # Set correct permissions
+          chown -R ec2-user:ec2-user /home/ec2-user/app
+          
+          # Start the service
+          systemctl enable urlshortener
+          systemctl start urlshortener
+
+Outputs:
+  InstancePublicIP:
+    Description: Public IP of the URL Shortener instance
+    Value: !GetAtt URLShortenerInstance.PublicIp
+  InstancePublicDNS:
+    Description: Public DNS of the URL Shortener instance
+    Value: !GetAtt URLShortenerInstance.PublicDnsName
+  WebsiteURL:
+    Description: URL of the URL Shortener application
+    Value: !Sub http://${URLShortenerInstance.PublicDnsName}:5000

@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: URL Shortener Serverless Application
+
+Globals:
+  Function:
+    Timeout: 10
+    Runtime: python3.9
+    MemorySize: 128
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref URLTable
+
+Resources:
+  URLShortenerAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+
+  URLTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: url-shortcuts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: short_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: short_code
+          KeyType: HASH
+
+  CreateURLFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      InlineCode: |
+        import json
+        import boto3
+        import random
+        import string
+        import os
+        from urllib.parse import unquote
+
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table(os.environ['TABLE_NAME'])
+
+        def generate_short_code():
+            return ''.join(random.choices(string.ascii_letters + string.digits, k=4))
+
+        def lambda_handler(event, context):
+            try:
+                # Get URL from path parameter
+                url = unquote(event['pathParameters']['url'])
+                
+                # Generate short code
+                short_code = generate_short_code()
+                
+                # Store in DynamoDB
+                table.put_item(
+                    Item={
+                        'short_code': short_code,
+                        'original_url': url
+                    }
+                )
+                
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'short_code': short_code,
+                        'original_url': url,
+                        'message': 'URL successfully shortened'
+                    })
+                }
+            except Exception as e:
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'error': str(e)
+                    })
+                }
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref URLTable
+      Events:
+        CreateURL:
+          Type: Api
+          Properties:
+            RestApiId: !Ref URLShortenerAPI
+            Path: /create/{url}
+            Method: get
+
+  RedirectURLFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      InlineCode: |
+        import json
+        import boto3
+        import os
+        from botocore.exceptions import ClientError
+
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table(os.environ['TABLE_NAME'])
+
+        def lambda_handler(event, context):
+            try:
+                # Get short code from path parameter
+                short_code = event['pathParameters']['short_code']
+                
+                # Get item from DynamoDB
+                response = table.get_item(
+                    Key={
+                        'short_code': short_code
+                    }
+                )
+                
+                # Check if item exists
+                if 'Item' in response:
+                    return {
+                        'statusCode': 301,
+                        'headers': {
+                            'Location': response['Item']['original_url'],
+                            'Access-Control-Allow-Origin': '*'
+                        }
+                    }
+                else:
+                    return {
+                        'statusCode': 404,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({
+                            'error': 'URL not found'
+                        })
+                    }
+                    
+            except ClientError as e:
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'error': str(e)
+                    })
+                }
+            except Exception as e:
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'error': str(e)
+                    })
+                }
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref URLTable
+      Events:
+        RedirectURL:
+          Type: Api
+          Properties:
+            RestApiId: !Ref URLShortenerAPI
+            Path: /{short_code}
+            Method: get
+
+Outputs:
+  APIEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${URLShortenerAPI}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  CreateURLFunction:
+    Description: Create URL Lambda Function ARN
+    Value: !GetAtt CreateURLFunction.Arn
+  RedirectURLFunction:
+    Description: Redirect URL Lambda Function ARN
+    Value: !GetAtt RedirectURLFunction.Arn

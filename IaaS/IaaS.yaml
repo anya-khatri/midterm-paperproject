@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'URL Shortener Microservices with Auto Scaling'
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access
+    Type: AWS::EC2::KeyPair::KeyName
+
+  VpcId:
+    Description: VPC where the instances will be created
+    Type: AWS::EC2::VPC::Id
+
+  SubnetId:
+    Description: Subnet where the instances will be created
+    Type: AWS::EC2::Subnet::Id
+    
+  SubnetId2:
+    Description: Second subnet for high availability
+    Type: AWS::EC2::Subnet::Id
+
+Resources:
+  # IAM Role and Security Group (same as your original)
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP and SSH
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
+
+  # Launch Templates for Auto Scaling
+  CreatorLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: ami-0230bd60aa48260c6
+        InstanceType: t2.micro
+        KeyName: !Ref KeyName
+        SecurityGroupIds: 
+          - !Ref SecurityGroup
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install python3-pip -y
+            mkdir -p /home/ec2-user/app
+            cd /home/ec2-user/app
+            
+            cat << EOF > requirements.txt
+            flask==2.0.1
+            boto3==1.26.137
+            EOF
+
+            cat << EOF > app.py
+            from flask import Flask, jsonify
+            import random
+            import string
+            import boto3
+
+            app = Flask(__name__)
+            dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+            table = dynamodb.Table('url_shortcuts')
+
+            def generate_short_code():
+                return ''.join(random.choices(string.ascii_letters + string.digits, k=4))
+
+            @app.route('/create/<path:url>')
+            def create_short_url(url):
+                short_code = generate_short_code()
+                table.put_item(
+                    Item={
+                        'short_code': short_code,
+                        'original_url': url
+                    }
+                )
+                return jsonify({
+                    "original_url": url,
+                    "short_code": short_code
+                })
+
+            if __name__ == '__main__':
+                app.run(host='0.0.0.0', port=5000)
+            EOF
+
+            pip3 install -r requirements.txt
+            python3 app.py &
+
+  RedirectorLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: ami-0230bd60aa48260c6
+        InstanceType: t2.micro
+        KeyName: !Ref KeyName
+        SecurityGroupIds: 
+          - !Ref SecurityGroup
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install python3-pip -y
+            mkdir -p /home/ec2-user/app
+            cd /home/ec2-user/app
+            
+            cat << EOF > requirements.txt
+            flask==2.0.1
+            boto3==1.26.137
+            EOF
+
+            cat << EOF > app.py
+            from flask import Flask, redirect, jsonify
+            import boto3
+
+            app = Flask(__name__)
+            dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+            table = dynamodb.Table('url_shortcuts')
+
+            @app.route('/<short_code>')
+            def redirect_url(short_code):
+                response = table.get_item(
+                    Key={
+                        'short_code': short_code
+                    }
+                )
+                item = response.get('Item')
+                if item:
+                    return redirect(item['original_url'])
+                return jsonify({"error": "URL not found"}), 404
+
+            if __name__ == '__main__':
+                app.run(host='0.0.0.0', port=5000)
+            EOF
+
+            pip3 install -r requirements.txt
+            python3 app.py &
+
+  # Auto Scaling Groups
+  CreatorASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: 
+        - !Ref SubnetId
+        - !Ref SubnetId2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref CreatorLaunchTemplate
+        Version: !GetAtt CreatorLaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 2
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: url-creator-asg
+          PropagateAtLaunch: true
+
+  RedirectorASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: 
+        - !Ref SubnetId
+        - !Ref SubnetId2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref RedirectorLaunchTemplate
+        Version: !GetAtt RedirectorLaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 2
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: url-redirector-asg
+          PropagateAtLaunch: true
+
+  # Auto Scaling Policies
+  CreatorScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref CreatorASG
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0
+
+  RedirectorScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref RedirectorASG
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0
+
+  URLShortenerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: url_shortcuts
+      AttributeDefinitions:
+        - AttributeName: short_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: short_code
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+Outputs:
+  CreatorASGName:
+    Description: Name of the Creator Auto Scaling Group
+    Value: !Ref CreatorASG
+
+  RedirectorASGName:
+    Description: Name of the Redirector Auto Scaling Group
+    Value: !Ref RedirectorASG
+
