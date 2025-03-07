@@ -1,0 +1,292 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'URL Shortener PaaS Architecture using Elastic Beanstalk with embedded application code'
+
+Parameters:
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the Elastic Beanstalk environment will be created
+
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of subnets for the Elastic Beanstalk environment
+
+Resources:
+  URLShortenerApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      Description: URL Shortener Application
+
+  ApplicationFiles:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+
+  URLShortenerPaaSTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: url_shortener_paas
+      AttributeDefinitions:
+        - AttributeName: short_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: short_code
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      Tags:
+        - Key: Environment
+          Value: PaaS
+        - Key: Service
+          Value: URLShortener
+
+  ApplicationZip:
+    Type: Custom::ApplicationZip
+    DependsOn: ApplicationFiles
+    Properties:
+      ServiceToken: !GetAtt ApplicationZipFunction.Arn
+      DestBucket: !Ref ApplicationFiles
+      ApplicationFiles:
+        "application.py": |
+          import os
+          from flask import Flask, jsonify, redirect, request
+          import boto3
+          import random
+          import string
+
+          application = Flask(__name__)
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+
+          def generate_short_code():
+              return ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+
+          @application.route('/')
+          def home():
+              return "URL Shortener Service - PaaS Version"
+
+          @application.route('/create/<path:url>')
+          def create_short_url(url):
+              short_code = generate_short_code()
+              table.put_item(
+                  Item={
+                      'short_code': short_code,
+                      'original_url': url
+                  }
+              )
+              return jsonify({
+                  "original_url": url,
+                  "short_code": short_code,
+                  "short_url": f"http://{request.host}/{short_code}"
+              })
+
+          @application.route('/<short_code>')
+          def redirect_url(short_code):
+              response = table.get_item(
+                  Key={
+                      'short_code': short_code
+                  }
+              )
+              item = response.get('Item')
+              if item:
+                  return redirect(item['original_url'])
+              return jsonify({"error": "URL not found"}), 404
+
+          if __name__ == '__main__':
+              application.run(host='0.0.0.0', port=5000)
+
+        "requirements.txt": |
+          Flask==2.0.1
+          boto3==1.26.137
+          Werkzeug==2.0.1
+
+        ".ebextensions/python.config": |
+          option_settings:
+            aws:elasticbeanstalk:container:python:
+              WSGIPath: application:application
+
+  ApplicationZipFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import boto3
+          import os
+          import zipfile
+          from io import BytesIO
+          import time
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] in ['Create', 'Update']:
+                      s3 = boto3.client('s3')
+                      dest_bucket = event['ResourceProperties']['DestBucket']
+                      app_files = event['ResourceProperties']['ApplicationFiles']
+                      
+                      # Create zip file in memory
+                      zip_buffer = BytesIO()
+                      with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                          for file_name, content in app_files.items():
+                              zip_file.writestr(file_name, content)
+                      
+                      # Upload to S3
+                      zip_buffer.seek(0)
+                      s3.put_object(
+                          Bucket=dest_bucket,
+                          Key='url_shortener.zip',
+                          Body=zip_buffer.getvalue()
+                      )
+                      
+                      # Verify the upload
+                      max_attempts = 5
+                      attempts = 0
+                      while attempts < max_attempts:
+                          try:
+                              s3.head_object(Bucket=dest_bucket, Key='url_shortener.zip')
+                              break
+                          except Exception:
+                              attempts += 1
+                              time.sleep(1)
+                      
+                      if attempts == max_attempts:
+                          raise Exception("Failed to verify S3 upload")
+                      
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                          'Message': 'Application files created successfully',
+                          'Location': f"s3://{dest_bucket}/url_shortener.zip"
+                      })
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                          'Message': 'Nothing to do for DELETE'
+                      })
+              except Exception as e:
+                  print(f"Error: {str(e)}")  # Add logging
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Error': str(e)
+                  })
+
+      Timeout: 30
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:HeadObject
+                Resource: !Sub ${ApplicationFiles.Arn}/*
+
+  ApplicationVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    DependsOn: ApplicationZip
+    Properties:
+      ApplicationName: !Ref URLShortenerApplication
+      Description: URL Shortener Application Version
+      SourceBundle:
+        S3Bucket: !Ref ApplicationFiles
+        S3Key: url_shortener.zip
+
+  URLShortenerEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    DependsOn: 
+      - ApplicationVersion
+      - ApplicationZip
+    Properties:
+      ApplicationName: !Ref URLShortenerApplication
+      EnvironmentName: URLShortenerPaaS
+      VersionLabel: !Ref ApplicationVersion
+      SolutionStackName: "64bit Amazon Linux 2 v3.3.13 running Python 3.8"
+      OptionSettings:
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: IamInstanceProfile
+          Value: !Ref InstanceProfile
+        - Namespace: aws:ec2:vpc
+          OptionName: VPCId
+          Value: !Ref VPCId
+        - Namespace: aws:ec2:vpc
+          OptionName: Subnets
+          Value: !Join [',', !Ref Subnets]
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DYNAMODB_TABLE
+          Value: !Ref URLShortenerPaaSTable
+        - Namespace: aws:autoscaling:asg
+          OptionName: MinSize
+          Value: '2'
+        - Namespace: aws:autoscaling:asg
+          OptionName: MaxSize
+          Value: '4'
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: EnvironmentType
+          Value: LoadBalanced
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: ServiceRole
+          Value: !Ref ServiceRole
+
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - elasticbeanstalk.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkService
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref InstanceRole
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+Outputs:
+  URLShortenerURL:
+    Description: URL of the Elastic Beanstalk Environment
+    Value: !GetAtt URLShortenerEnvironment.EndpointURL
+  DynamoDBTable:
+    Description: Name of the DynamoDB table
+    Value: !Ref URLShortenerPaaSTable
