@@ -19,15 +19,17 @@ A comprehensive comparison of URL shortener service deployment using Monolithic,
 url-shortener/
 ├── monolithic/
 │   ├── app.py
-│   └── template.yaml
+│   └── monolithic.yaml
 ├── iaas/
 │   ├── creator-service/
 │   │   └── app.py
 │   ├── redirector-service/
 │   │   └── app.py
-│   └── template.yaml
+│   └── iaas.yaml
+├── paas/
+│   └── iaas.yaml
 ├── serverless/
-│   └── template.yaml
+│   └── serverless.yaml
 ├── tests/
 │   └── performance_test.py
 └── requirements.txt
@@ -37,10 +39,6 @@ url-shortener/
 
 1. AWS CLI installed and configured
 2. Python 3.9 or higher
-3. Required Python packages:
-```bash
-pip install requests pandas matplotlib psutil
-```
 
 ## Deployment Instructions
 
@@ -113,6 +111,25 @@ curl "$CREATOR_URL/create/https://www.example.com"
 # Use short URL
 curl -L "$REDIRECTOR_URL/ABC123"
 ```
+
+### PaaS Deployment
+
+1. aws cloudformation create-stack \
+  --stack-name url-shortener-paas \
+  --template-body file://paas.yaml \
+  --parameters \
+    ParameterKey=VpcId,ParameterValue=your-vpc-id \
+    ParameterKey=Subnets,ParameterValue=your-subnet1-id\\,your-subnet2-id \
+  --capabilities CAPABILITY_IAM
+
+3. Test the deployment:
+```bash
+# Create short URL
+curl "$API_URL/create/https://www.example.com"
+
+# Use short URL
+curl -L "$API_URL/ABC123"
+
 
 ### Serverless Deployment
 
