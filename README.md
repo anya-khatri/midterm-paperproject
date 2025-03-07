@@ -123,6 +123,7 @@ curl -L "$REDIRECTOR_URL/ABC123"
     ParameterKey=VpcId,ParameterValue=your-vpc-id \
     ParameterKey=Subnets,ParameterValue=your-subnet1-id\\,your-subnet2-id \
   --capabilities CAPABILITY_IAM
+  ```
 
 2. Get the endpoints:
   ```bash
@@ -130,6 +131,7 @@ export PAAS_URL=$(aws cloudformation describe-stacks \
   --stack-name url-shortener-paas \
   --query 'Stacks[0].Outputs[?OutputKey==`URLShortenerURL`].OutputValue' \
   --output text)
+```
 
 
 3. Test the deployment:
@@ -139,6 +141,7 @@ curl "$API_URL/create/https://www.example.com"
 
 # Use short URL
 curl -L "$API_URL/ABC123"
+```
 
 
 ### Serverless Deployment
