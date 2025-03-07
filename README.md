@@ -117,14 +117,13 @@ curl -L "$REDIRECTOR_URL/ABC123"
 1. Deploy the stack:
    ```bash
    aws cloudformation create-stack \
-  --stack-name url-shortener-paas \
-  --template-body file://paas.yaml \
-  --parameters \
-    ParameterKey=VpcId,ParameterValue=your-vpc-id \
-    ParameterKey=Subnets,ParameterValue=your-subnet1-id\\,your-subnet2-id \
-  --capabilities CAPABILITY_IAM
+    --stack-name url-shortener-paas \
+    --template-body file://paas.yaml \
+    --parameters \
+      ParameterKey=VpcId,ParameterValue=your-vpc-id \
+      ParameterKey=Subnets,ParameterValue=your-subnet1-id\\,your-subnet2-id \
+    --capabilities CAPABILITY_IAM
   ```
-
 2. Get the endpoints:
   ```bash
 export PAAS_URL=$(aws cloudformation describe-stacks \
@@ -132,7 +131,6 @@ export PAAS_URL=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`URLShortenerURL`].OutputValue' \
   --output text)
 ```
-
 
 3. Test the deployment:
 ```bash
@@ -198,20 +196,22 @@ scenarios = [
 
 ### Results
 Results will be saved as:
-- `performance_comparison_TIMESTAMP.png`  # Performance graphs
 - `performance_stats_TIMESTAMP.csv`      # Detailed metrics
 
 ## Cleanup
 
 ```bash
 # Remove Monolithic Stack
-aws cloudformation delete-stack --stack-name url-shortener-mono
+aws cloudformation delete-stack --stack-name [insert stack name]
 
 # Remove IaaS Stack
-aws cloudformation delete-stack --stack-name url-shortener-iaas
+aws cloudformation delete-stack --stack-name [insert stack name]
+
+# Remove PaaS Stack
+aws cloudformation delete-stack --stack-name [insert stack name]
 
 # Remove Serverless Stack
-aws cloudformation delete-stack --stack-name url-shortener-serverless
+aws cloudformation delete-stack --stack-name [insert stack name]
 ```
 
 ## Troubleshooting
