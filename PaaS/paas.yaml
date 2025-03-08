@@ -217,7 +217,7 @@ Resources:
       ApplicationName: !Ref URLShortenerApplication
       EnvironmentName: URLShortenerPaaS
       VersionLabel: !Ref ApplicationVersion
-      SolutionStackName: "64bit Amazon Linux 2 v3.3.13 running Python 3.8"
+      SolutionStackName: "64bit Amazon Linux 2 v3.7.9 running Python 3.8"
       OptionSettings:
         - Namespace: aws:autoscaling:launchconfiguration
           OptionName: IamInstanceProfile
