@@ -1,6 +1,6 @@
 # URL Shortener - Architecture Comparison
 
-A comprehensive comparison of URL shortener service deployment using Monolithic, IaaS (Microservices), and Serverless architectures.
+A comparison of URL shortener service deployment using Monolithic, IaaS, PaaS and Serverless architectures.
 
 ## Table of Contents
 - [Architecture Overview](#architecture-overview)
@@ -194,10 +194,6 @@ scenarios = [
 ]
 ```
 
-### Results
-Results will be saved as:
-- `performance_stats_TIMESTAMP.csv`      # Detailed metrics
-
 ## Cleanup
 
 ```bash
@@ -255,7 +251,6 @@ aws cloudwatch get-metric-statistics \
    - Regularly rotate credentials
    - Monitor AWS CloudTrail
 
-## Monitoring
 
 ### Key Metrics
 1. Performance Metrics
